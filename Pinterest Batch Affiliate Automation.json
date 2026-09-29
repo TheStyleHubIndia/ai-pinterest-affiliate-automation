@@ -1,0 +1,140 @@
+{
+  "name": "Pinterest Batch Affiliate Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pinterest-batch",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "batch-webhook",
+      "name": "Batch URL Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "pinterest-batch"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\nconst input = Array.isArray(body.urls) ? body.urls : (typeof body.urls === 'string' ? body.urls.split(/\\r?\\n|,/): []);\nconst seen = new Set();\nconst out = [];\nfor (const raw of input) {\n  const url = String(raw ?? '').trim();\n  if (!/^https?:\\/\\//i.test(url)) continue;\n  let normalized = url;\n  try {\n    const u = new URL(url);\n    u.hash = '';\n    normalized = u.toString();\n  } catch {}\n  const key = normalized.toLowerCase();\n  if (seen.has(key)) continue;\n  seen.add(key);\n  const asin = (normalized.match(/\\/(?:dp|gp\\/product)\\/(\\w{10})(?:[/?]|$)/i) || normalized.match(/[?&]asin=(\\w{10})/i) || [])[1] || null;\n  out.push({ json: { batchId: $execution.id, sourceUrl: normalized, asin, status: 'queued', queuedAt: new Date().toISOString() } });\n}\nif (!out.length) throw new Error('No valid HTTP(S) URLs found. Send {"urls":["https://..."]} or newline-separated URLs.');\nreturn out;"
+      },
+      "id": "normalize-batch",
+      "name": "Validate + Deduplicate URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{$json.asin}}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-asin",
+      "name": "Amazon ASIN Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.rainforestapi.com/request",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api_key", "value": "={{$env.RAINFOREST_API_KEY}}" },
+            { "name": "type", "value": "product" },
+            { "name": "amazon_domain", "value": "amazon.com" },
+            { "name": "asin", "value": "={{$json.asin}}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "rainforest-product",
+      "name": "Rainforest Product Lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [980, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $json.product || $json;\nconst source = $('Validate + Deduplicate URLs').item.json;\nconst product = {\n  Product: p.title || null,\n  AffiliateLink: p.link || source.sourceUrl,\n  Rating: p.rating ?? null,\n  Reviews: p.ratings_total ?? null,\n  Price: p.price?.value ?? null,\n  Image: p.image || null,\n  Category: p.categories?.[0] || 'General',\n  SourceUrl: source.sourceUrl,\n  ASIN: source.asin,\n  BatchId: source.batchId\n};\nif (!product.Product || !product.AffiliateLink) throw new Error('Rainforest did not return a usable product for '+source.sourceUrl);\nreturn [{json: {products: [product]}}];"
+      },
+      "id": "clean-product",
+      "name": "Clean Real Product Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1220, 220]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Create ONE Pinterest affiliate pin from the REAL product in {{$json.products[0]}}. Preserve Product and AffiliateLink exactly. Do not invent facts, price, rating, reviews, URLs or claims. Return ONLY valid JSON with: Product, Title, Description, Keywords, Hashtags, AffiliateLink, Category, Disclosure. Title under 100 characters. Description concise. Keywords max 5. Hashtags max 5. Disclosure should clearly identify the link as an affiliate link.",
+        "options": {
+          "systemMessage": "You create accurate Pinterest affiliate content from supplied product data only. Never fabricate product facts or alter the source URL. Return raw JSON only."
+        }
+      },
+      "id": "ai-content",
+      "name": "AI Pin Content",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [1480, 220]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "gemini-model",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [1480, 460]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = String($json.output || '').trim();\nlet item;\ntry { item = JSON.parse(raw.replace(/^\\uFEFF/, '')); } catch (e) { throw new Error('AI returned invalid JSON: '+raw.slice(0,300)); }\nif (!item.Product || !item.AffiliateLink) throw new Error('AI output missing required fields');\nreturn [{json: {...item, status: 'content_ready', generatedAt: new Date().toISOString()}}];"
+      },
+      "id": "parse-ai",
+      "name": "Validate AI JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, mode: 'batch', batchId: $('Validate + Deduplicate URLs').first().json.batchId, count: $input.all().length, status: 'content_ready', items: $input.all().map(i => i.json) } }}",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Batch Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [2000, 220]
+    }
+  ],
+  "connections": {
+    "Batch URL Webhook": { "main": [[{ "node": "Validate + Deduplicate URLs", "type": "main", "index": 0 }]] },
+    "Validate + Deduplicate URLs": { "main": [[{ "node": "Amazon ASIN Found?", "type": "main", "index": 0 }]] },
+    "Amazon ASIN Found?": { "main": [[{ "node": "Rainforest Product Lookup", "type": "main", "index": 0 }], [{ "node": "Batch Response", "type": "main", "index": 0 }]] },
+    "Rainforest Product Lookup": { "main": [[{ "node": "Clean Real Product Data", "type": "main", "index": 0 }]] },
+    "Clean Real Product Data": { "main": [[{ "node": "AI Pin Content", "type": "main", "index": 0 }]] },
+    "Google Gemini Chat Model": { "ai_languageModel": [[{ "node": "AI Pin Content", "type": "ai_languageModel", "index": 0 }]] },
+    "AI Pin Content": { "main": [[{ "node": "Validate AI JSON", "type": "main", "index": 0 }]] },
+    "Validate AI JSON": { "main": [[{ "node": "Batch Response", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "binaryMode": "separate" },
+  "pinData": {},
+  "tags": []
+}
