@@ -193,7 +193,7 @@
           "parameters": [
             {
               "name": "api_key",
-              "value": "0C7F3912E6024A688478710228A91403"
+              "value": "={{$env.RAINFOREST_API_KEY}}"
             },
             {
               "name": "type",
