@@ -1,0 +1,98 @@
+{
+  "name": "Pinterest Publishing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pinterest-publish",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "publish-webhook",
+      "name": "Publish Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "pinterest-publish"
+    },
+    {
+      "parameters": {
+        "url": "https://api.pinterest.com/v5/boards",
+        "sendQuery": true,
+        "queryParameters": { "parameters": [{ "name": "page_size", "value": "250" }] },
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "=Bearer {{$env.PINTEREST_ACCESS_TOKEN}}" }] },
+        "options": {}
+      },
+      "id": "list-boards",
+      "name": "Pinterest List Boards",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $('Publish Webhook').first().json.body ?? $('Publish Webhook').first().json;\nconst boards = $json.items || [];\nconst wanted = String($env.PINTEREST_BOARD_NAME || '').trim().toLowerCase();\nconst board = wanted ? boards.find(b => String(b.name || '').trim().toLowerCase() === wanted) : boards[0];\nif (!board) throw new Error(wanted ? 'Pinterest board not found: '+wanted : 'No Pinterest boards found');\nconst items = Array.isArray(body.items) ? body.items : [body];\nreturn items.map(item => ({json: {...item, boardId: board.id, boardName: board.name}}));"
+      },
+      "id": "select-board",
+      "name": "Select Pinterest Board",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pinterest.com/v5/pins",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "Authorization", "value": "=Bearer {{$env.PINTEREST_ACCESS_TOKEN}}" },
+          { "name": "Content-Type", "value": "application/json" }
+        ] },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ board_id: $json.boardId, title: $json.Title, description: (($json.Description || '') + '\\n\\n' + ($json.Disclosure || 'Affiliate link disclosure: this Pin may contain an affiliate link.')), link: $json.AffiliateLink, media_source: { source_type: 'image_url', url: $json.Image, is_standard: true } }) }}",
+        "options": {}
+      },
+      "id": "create-pin",
+      "name": "Create Pinterest Pin",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1020, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(i => ({json: {ok: true, status: 'published', pinId: i.json.id || null, pinUrl: i.json.link || null, boardId: i.json.board_id || null, createdAt: new Date().toISOString()}}));"
+      },
+      "id": "publish-status",
+      "name": "Publish Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1280, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, items: $input.all().map(i => i.json) } }}",
+        "options": {}
+      },
+      "id": "publish-response",
+      "name": "Publish Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [1540, 300]
+    }
+  ],
+  "connections": {
+    "Publish Webhook": { "main": [[{ "node": "Pinterest List Boards", "type": "main", "index": 0 }]] },
+    "Pinterest List Boards": { "main": [[{ "node": "Select Pinterest Board", "type": "main", "index": 0 }]] },
+    "Select Pinterest Board": { "main": [[{ "node": "Create Pinterest Pin", "type": "main", "index": 0 }]] },
+    "Create Pinterest Pin": { "main": [[{ "node": "Publish Status", "type": "main", "index": 0 }]] },
+    "Publish Status": { "main": [[{ "node": "Publish Response", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}
